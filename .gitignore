@@ -52,6 +52,7 @@ dmypy.json
 
 # Secrets
 .env
+.pypirc
 *.secrets.yaml
 mcp_agent.secrets.yaml
 
@@ -67,3 +68,39 @@ temp/
 
 # MCP temp configs
 browsy-mcp-*.yaml
+
+# ====== Project-local files (not part of the package) ======
+# Screenshots
+*.png
+
+# Utility scripts (not part of package)
+check_openrouter_quota.py
+list_gemini_models.py
+demo_fastapi.py
+run_streamlit.bat
+run_streamlit.py
+
+# Root-level test scripts (real tests are in tests/)
+test_api.py
+test_api_key.py
+test_fresh_instance.py
+test_headed_mode.py
+test_headed_simple.py
+test_performance_integration.py
+test_query.py
+test_streamlit_backend.py
+
+# Extra documentation guides (README.md and CHANGELOG.md are enough)
+API_TEST_RESULTS.md
+BROWSY_COMPLETE_GUIDE.md
+DEMO_README.md
+FASTAPI_USAGE.md
+FRONTEND_GUIDE.md
+GETTING_STARTED.md
+HEADED_MODE_GUIDE.md
+IMPLEMENTATION_SUMMARY.md
+LLM_SUPPORT.md
+PERFORMANCE_OPTIMIZATIONS.md
+PUBLISHING_GUIDE.md
+PYPI_PUBLISHING_GUIDE.md
+STREAMLIT_README.md

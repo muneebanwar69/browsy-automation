@@ -46,15 +46,20 @@ class BrowsyConfig(BaseSettings):
         extra="ignore",
     )
     
-    # ============ OpenAI Configuration ============
+    # ============ LLM Configuration ============
     openai_api_key: str = Field(
         default="",
-        description="OpenAI API key (required)",
+        description="LLM API key (OpenAI, LLM Gateway, or any OpenAI-compatible provider)",
+    )
+    
+    openai_base_url: Optional[str] = Field(
+        default=None,
+        description="Custom API base URL (e.g., https://api.llmgateway.io/v1 for LLM Gateway)",
     )
     
     openai_model: str = Field(
         default="gpt-4o-mini",
-        description="OpenAI model to use",
+        description="Model to use (e.g., gpt-4o-mini, gpt-4o)",
     )
     
     max_tokens: int = Field(
@@ -131,6 +136,45 @@ class BrowsyConfig(BaseSettings):
         description="CORS allowed origins",
     )
     
+    # ============ Performance Configuration ============
+    enable_browser_reuse: bool = Field(
+        default=True,
+        description="Reuse browser instances across requests for better performance",
+    )
+    
+    enable_resource_blocking: bool = Field(
+        default=True,
+        description="Block unnecessary resources based on task type",
+    )
+    
+    enable_session_caching: bool = Field(
+        default=True,
+        description="Cache login sessions and cookies",
+    )
+    
+    cache_ttl: int = Field(
+        default=3600,
+        ge=60,
+        description="Cache time-to-live in seconds",
+    )
+    
+    max_browser_pool_size: int = Field(
+        default=1,
+        ge=1,
+        le=5,
+        description="Maximum number of browser instances in pool",
+    )
+    
+    enable_performance_metrics: bool = Field(
+        default=True,
+        description="Track and report performance metrics",
+    )
+    
+    resource_strategy: str = Field(
+        default="auto",
+        description="Resource loading strategy: auto, screenshot, data, interact, speed",
+    )
+    
     # ============ Methods ============
     
     @classmethod
@@ -188,8 +232,25 @@ class BrowsyConfig(BaseSettings):
             MCP config dictionary for mcp-agent
         """
         args = self.playwright_args.copy()
-        if self.playwright_headless and "--headless" not in args:
-            args.append("--headless")
+        
+        # Handle headless flag properly
+        if self.playwright_headless:
+            # Add --headless if not present
+            if "--headless" not in args:
+                args.append("--headless")
+        else:
+            # Remove --headless if present (for headed mode)
+            args = [arg for arg in args if arg != "--headless"]
+        
+        # Build OpenAI config with credentials
+        openai_config = {
+            "default_model": self.openai_model,
+            "api_key": self.openai_api_key,
+        }
+        
+        # Add base URL if specified (for OpenRouter, LLM Gateway, etc.)
+        if self.openai_base_url:
+            openai_config["base_url"] = self.openai_base_url
         
         return {
             "execution_engine": "asyncio",
@@ -211,21 +272,17 @@ class BrowsyConfig(BaseSettings):
                     }
                 }
             },
-            "openai": {
-                "default_model": self.openai_model,
-            },
+            "openai": openai_config,
         }
     
     def validate_api_key(self) -> bool:
         """
-        Validate that OpenAI API key is set.
+        Validate that API key is set.
         
         Returns:
-            True if API key is valid (non-empty and starts with sk-)
+            True if API key is valid (non-empty)
         """
-        if not self.openai_api_key:
-            return False
-        return self.openai_api_key.startswith("sk-")
+        return bool(self.openai_api_key and self.openai_api_key.strip())
     
     def __repr__(self) -> str:
         """Safe repr that hides API key."""

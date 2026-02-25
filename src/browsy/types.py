@@ -2,6 +2,8 @@
 Type definitions and Pydantic models for Browsy.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from enum import Enum
 from typing import Optional, Dict, Any, List
@@ -53,6 +55,10 @@ class ResultEvent(BrowsyEvent):
     elapsed: float = Field(description="Execution time in seconds")
     message: str = "Query completed successfully"
     progress: int = 100
+    screenshots: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Captured screenshots as list of {data: base64, mime_type: str, tool_name: str}",
+    )
 
 
 class ErrorEvent(BrowsyEvent):
@@ -81,6 +87,7 @@ class SessionInfo(BaseModel):
     created_at: datetime
     query_count: int = 0
     queries: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class QueryResult(BaseModel):

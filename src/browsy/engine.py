@@ -2,6 +2,8 @@
 Core BrowsyEngine - main interface for web automation.
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
 import time
@@ -16,6 +18,8 @@ from mcp_agent.agents.agent import Agent
 from mcp_agent.workflows.llm.augmented_llm_openai import OpenAIAugmentedLLM
 from mcp_agent.workflows.llm.augmented_llm import RequestParams
 
+from browsy.llm import BrowsyOpenAILLM
+
 from browsy.config import BrowsyConfig
 from browsy.types import (
     BrowsyEvent,
@@ -27,6 +31,15 @@ from browsy.types import (
     QueryResult,
 )
 from browsy.session import SessionManager
+from browsy.performance import (
+    get_browser_pool,
+    get_cache_manager,
+    get_performance_metrics,
+    TaskDetector,
+    TaskType,
+    ResourceStrategy,
+    BrowserOptimizer,
+)
 
 
 class BrowsyEngine:
@@ -102,12 +115,16 @@ class BrowsyEngine:
         # Validate API key
         if not self.config.validate_api_key():
             raise ValueError(
-                "Invalid or missing OpenAI API key. "
+                "Invalid or missing LLM API key. "
                 "Provide via: config, openai_api_key parameter, or BROWSY_OPENAI_API_KEY env var"
             )
         
         # Set OpenAI API key in environment for mcp-agent
         os.environ["OPENAI_API_KEY"] = self.config.openai_api_key
+        
+        # Set custom base URL if provided (for LLM Gateway, etc.)
+        if self.config.openai_base_url:
+            os.environ["OPENAI_BASE_URL"] = self.config.openai_base_url
         
         # State
         self.mcp_app: Optional[MCPApp] = None
@@ -116,6 +133,11 @@ class BrowsyEngine:
         self.browser_agent: Optional[Agent] = None
         self.llm = None
         self.initialized = False
+        
+        # Performance optimizations
+        self.browser_pool = get_browser_pool() if config.enable_browser_reuse else None
+        self.cache_manager = get_cache_manager() if config.enable_session_caching else None
+        self.metrics = get_performance_metrics() if config.enable_performance_metrics else None
         
         # Session management
         self.session_manager = SessionManager()
@@ -151,29 +173,45 @@ class BrowsyEngine:
             return
         
         try:
+            # Track initialization time
+            init_start = time.time()
+            
             # Create temporary MCP config file
             self._temp_config_file = self._create_mcp_config()
             
-            # Initialize MCP app
-            self.mcp_app = MCPApp(
-                name=self.config.mcp_app_name,
-                mcp_config_path=self._temp_config_file,
+            # Parallel initialization of independent components
+            async def init_mcp():
+                """Initialize MCP app and context."""
+                self.mcp_app = MCPApp(
+                    name=self.config.mcp_app_name,
+                    settings=self._temp_config_file,
+                )
+                self.mcp_context = self.mcp_app.run()
+                self.mcp_agent_app = await self.mcp_context.__aenter__()
+            
+            async def init_browser_pool():
+                """Initialize browser pool if enabled."""
+                if self.browser_pool:
+                    await self.browser_pool.initialize(
+                        headless=self.config.playwright_headless
+                    )
+            
+            # Run initializations in parallel
+            await asyncio.gather(
+                init_mcp(),
+                init_browser_pool(),
             )
             
-            # Start MCP context
-            self.mcp_context = self.mcp_app.run()
-            self.mcp_agent_app = await self.mcp_context.__aenter__()
-            
-            # Create browser agent
+            # Create browser agent (depends on MCP)
             self.browser_agent = Agent(
                 name="browser",
                 instruction=self._get_agent_instruction(),
                 server_names=["playwright"],
             )
             
-            # Initialize agent and attach LLM
+            # Initialize agent and attach LLM (custom subclass handles screenshots)
             await self.browser_agent.initialize()
-            self.llm = await self.browser_agent.attach_llm(OpenAIAugmentedLLM)
+            self.llm = await self.browser_agent.attach_llm(BrowsyOpenAILLM)
             
             # Get tool count for logging
             tools_result = await self.browser_agent.list_tools()
@@ -181,7 +219,15 @@ class BrowsyEngine:
             
             self.initialized = True
             
-            print(f"✅ BrowsyEngine initialized with {tool_count} Playwright tools")
+            init_time = round(time.time() - init_start, 2)
+            
+            print(f"✅ BrowsyEngine initialized in {init_time}s with {tool_count} Playwright tools")
+            if self.config.enable_browser_reuse:
+                print("⚡ Browser reuse enabled - faster subsequent requests")
+            if self.config.enable_resource_blocking:
+                print("🚀 Smart resource blocking enabled - optimized for task type")
+            if self.config.enable_session_caching:
+                print("💾 Session caching enabled - login sessions will be cached")
             
         except Exception as e:
             # Cleanup on failure
@@ -231,10 +277,24 @@ class BrowsyEngine:
         session = self.session_manager.get_or_create_session(session_id)
         session_id = session.session_id
         
+        # Detect task type for optimization
+        task_type = TaskType.UNKNOWN
+        resource_strategy = ResourceStrategy.INTERACTION
+        
+        if self.config.enable_resource_blocking:
+            task_type = TaskDetector.detect_task_type(query)
+            resource_strategy = TaskDetector.get_resource_strategy(task_type)
+            
+            # Store strategy in session for later use
+            if not hasattr(session, 'metadata'):
+                session.metadata = {}
+            session.metadata['task_type'] = task_type.value
+            session.metadata['resource_strategy'] = resource_strategy.value
+        
         # Stage 1: Initializing
         yield ProgressEvent(
             stage=ProgressStage.INITIALIZING,
-            message="Setting up Browsy agent...",
+            message=f"Setting up Browsy agent ({resource_strategy.value} mode)...",
             progress=10,
             session_id=session_id,
         )
@@ -246,15 +306,13 @@ class BrowsyEngine:
             session_id=session_id,
         )
         
-        # Stage 2: Connecting
+        # Stage 2: Connecting (no artificial delay!)
         yield ProgressEvent(
             stage=ProgressStage.CONNECTING,
             message="Connecting to browser...",
             progress=40,
             session_id=session_id,
         )
-        
-        await asyncio.sleep(0.2)  # Small delay to show progress
         
         yield ProgressEvent(
             stage=ProgressStage.CONNECTED,
@@ -264,15 +322,32 @@ class BrowsyEngine:
         )
         
         # Stage 3: Processing
+        processing_msg = "Executing your task..."
+        if task_type == TaskType.SCREENSHOT:
+            processing_msg = "Taking screenshot (loading all resources)..."
+        elif task_type == TaskType.INTERACTION:
+            processing_msg = "Performing interaction (fast mode)..."
+        elif task_type == TaskType.DATA_EXTRACTION:
+            processing_msg = "Extracting data..."
+        
         yield ProgressEvent(
             stage=ProgressStage.PROCESSING,
-            message="Executing your task...",
+            message=processing_msg,
             progress=60,
             session_id=session_id,
         )
         
         try:
+            # Start performance tracking
+            tracking_id = None
+            if self.metrics:
+                tracking_id = self.metrics.start_operation("query_execution")
+            
             start_time = time.time()
+            
+            # Clear any previously captured screenshots
+            if hasattr(self.llm, 'clear_screenshots'):
+                self.llm.clear_screenshots()
             
             # Execute query via LLM
             result = await self.llm.generate_str(
@@ -285,10 +360,14 @@ class BrowsyEngine:
             
             elapsed = round(time.time() - start_time, 2)
             
+            # End performance tracking
+            if self.metrics and tracking_id:
+                self.metrics.end_operation(tracking_id)
+            
             # Check for empty result (usually API error)
             if not result or result.strip() == "":
                 yield ErrorEvent(
-                    message="OpenAI API error - check your API key quota",
+                    message="LLM API error - check your API key, base URL, and quota",
                     error_type="APIError",
                     session_id=session_id,
                 )
@@ -317,12 +396,18 @@ class BrowsyEngine:
             self.successful_queries += 1
             self.total_time += elapsed
             
+            # Collect captured screenshots
+            screenshots = []
+            if hasattr(self.llm, 'get_screenshots_base64'):
+                screenshots = self.llm.get_screenshots_base64()
+            
             # Stage 5: Complete
             yield ResultEvent(
                 result=result,
                 elapsed=elapsed,
-                message=f"Completed in {elapsed}s",
+                message=f"Completed in {elapsed}s ({resource_strategy.value} mode)",
                 session_id=session_id,
+                screenshots=screenshots,
             )
             
         except Exception as e:
@@ -399,6 +484,25 @@ class BrowsyEngine:
                 await self.mcp_context.__aexit__(None, None, None)
             except Exception as e:
                 print(f"Warning: Error during MCP context cleanup: {e}")
+            finally:
+                self.mcp_context = None
+        
+        # Clean up browser pool
+        if self.browser_pool:
+            try:
+                await self.browser_pool.cleanup()
+            except Exception as e:
+                print(f"Warning: Error during browser pool cleanup: {e}")
+        
+        # Clean up cache manager
+        if self.cache_manager:
+            try:
+                self.cache_manager.clear_expired()
+            except Exception as e:
+                print(f"Warning: Error during cache cleanup: {e}")
+        
+        # Force-kill any remaining automation processes on Windows
+        self._force_kill_automation_processes()
         
         # Clean up temp config file
         if self._temp_config_file and os.path.exists(self._temp_config_file):
@@ -431,7 +535,7 @@ class BrowsyEngine:
             else 100.0
         )
         
-        return {
+        stats = {
             "total_queries": self.total_queries,
             "successful_queries": self.successful_queries,
             "success_rate": success_rate,
@@ -439,6 +543,21 @@ class BrowsyEngine:
             "active_sessions": len(self.session_manager.sessions),
             "uptime_seconds": round(uptime, 1),
         }
+        
+        # Add performance metrics if enabled
+        if self.metrics:
+            perf_stats = self.metrics.get_all_stats()
+            if perf_stats:
+                stats["performance_metrics"] = perf_stats
+        
+        # Add optimization status
+        stats["optimizations"] = {
+            "browser_reuse": self.config.enable_browser_reuse,
+            "resource_blocking": self.config.enable_resource_blocking,
+            "session_caching": self.config.enable_session_caching,
+        }
+        
+        return stats
     
     # ============ Context Manager Support ============
     
@@ -453,6 +572,47 @@ class BrowsyEngine:
         return False
     
     # ============ Private Helpers ============
+    
+    def _force_kill_automation_processes(self):
+        """Force-kill any remaining Playwright/Node automation processes on Windows.
+        
+        This is a safety net to ensure no stale browser or node processes
+        remain after cleanup. Only kills automation-related processes,
+        NOT the user's normal browser.
+        """
+        import subprocess as _sp
+        import platform
+        
+        if platform.system() != "Windows":
+            return
+        
+        # Kill node.exe processes running Playwright MCP
+        try:
+            ps_cmd = (
+                "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" "
+                "| Where-Object { $_.CommandLine -match 'playwright' } "
+                "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            )
+            _sp.run(
+                ['powershell', '-NoProfile', '-Command', ps_cmd],
+                capture_output=True, timeout=10
+            )
+        except Exception:
+            pass
+        
+        # Kill automation browser instances (not user's browser)
+        try:
+            ps_cmd = (
+                "Get-CimInstance Win32_Process "
+                "| Where-Object { $_.Name -match 'chrom' -and $_.CommandLine -match 'remote-debugging|--headless|--disable-background' } "
+                "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            )
+            _sp.run(
+                ['powershell', '-NoProfile', '-Command', ps_cmd],
+                capture_output=True, timeout=10
+            )
+        except Exception:
+            pass
     
     def _create_mcp_config(self) -> str:
         """Create temporary MCP config file."""
@@ -471,16 +631,32 @@ class BrowsyEngine:
     
     def _get_agent_instruction(self) -> str:
         """Get system instruction for browser agent."""
-        return """You are Browsy, an intelligent web automation assistant powered by Playwright.
+        return """You are Browsy, an intelligent web automation assistant with full Playwright browser capabilities.
 
-You can:
-- Navigate to any website and interact with it
-- Click buttons, fill forms, scroll pages
-- Extract information and data from web pages
-- Take screenshots of pages or elements
+You have access to REAL browser tools via Playwright MCP server. You CAN and MUST:
+- Navigate to ANY website on the internet (use playwright_navigate tool)
+- Click buttons and links (use playwright_click tool)
+- Fill forms and input fields (use playwright_fill tool)
+- Take screenshots (use playwright_screenshot tool)
+- Extract text and data from pages (use playwright_evaluate tool)
+- Scroll pages and interact with elements
 - Perform multi-step web automation tasks
-- Provide detailed summaries in markdown format
 
-Always provide clear status updates about what you're doing.
-Format your responses in clean markdown with proper structure.
-Be helpful, accurate, and efficient in completing tasks."""
+IMPORTANT: You ARE connected to a real browser. When asked to visit a website or perform browser actions, USE YOUR TOOLS - don't say you can't access the internet.
+
+CRITICAL RULES:
+1. Use the appropriate Playwright tools to complete the task
+2. Provide clear status updates about what you're doing
+3. Format your responses in clean markdown with proper structure
+4. Be helpful, accurate, and efficient in completing tasks
+5. **ALWAYS take a screenshot using playwright_screenshot at the END of every task** — this is mandatory so the user can see what the browser shows. The screenshot will be displayed in the UI automatically.
+6. If the task involves multiple pages, take a screenshot of each important page
+7. Never skip the final screenshot — the user needs visual confirmation
+
+Example task flow:
+User: "Go to amazon.com and take a screenshot"
+You should:
+1. Use playwright_navigate to go to amazon.com
+2. Wait for the page to load
+3. Use playwright_screenshot to capture the page (MANDATORY)
+4. Report success with details about what you see on the page"""

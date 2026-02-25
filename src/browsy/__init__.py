@@ -35,8 +35,17 @@ from browsy.types import (
     ErrorEvent,
     EventType,
 )
+from browsy.performance import (
+    ResourceStrategy,
+    TaskType,
+    TaskDetector,
+    BrowserOptimizer,
+    PerformanceMetrics,
+    CacheManager,
+    BrowserPool,
+)
 
-__version__ = "0.1.0"
+__version__ = "0.3.2"
 __all__ = [
     "BrowsyEngine",
     "BrowsyConfig",
@@ -45,4 +54,11 @@ __all__ = [
     "ResultEvent",
     "ErrorEvent",
     "EventType",
+    "ResourceStrategy",
+    "TaskType",
+    "TaskDetector",
+    "BrowserOptimizer",
+    "PerformanceMetrics",
+    "CacheManager",
+    "BrowserPool",
 ]
