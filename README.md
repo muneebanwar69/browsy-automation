@@ -1,5 +1,5 @@
 # Browsy Automation
-
+By Muneeb Ali Anwar
 > Intelligent web automation powered by Playwright, MCP, and OpenAI LLM
 
 [![PyPI version](https://badge.fury.io/py/browsy-automation.svg)](https://badge.fury.io/py/browsy-automation)
@@ -418,8 +418,8 @@ MIT License - see LICENSE file for details
 
 ## 📞 Support
 
-- GitHub Issues: https://github.com/yourusername/browsy-automation/issues
-- Documentation: https://github.com/yourusername/browsy-automation#readme
+- GitHub Issues: https://github.com/muneebanwar69/browsy-automation/issues
+- Documentation: https://github.com/muneebanwar69/browsy-automation#readme
 
 ---
 
